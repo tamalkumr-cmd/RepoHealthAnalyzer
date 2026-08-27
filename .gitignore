@@ -1,0 +1,4 @@
+﻿.venv/
+.repohealth/
+__pycache__/
+*.pyc
