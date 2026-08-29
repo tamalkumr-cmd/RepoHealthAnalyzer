@@ -2,3 +2,4 @@
 .repohealth/
 __pycache__/
 *.pyc
+graph.json

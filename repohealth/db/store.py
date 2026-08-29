@@ -183,3 +183,49 @@ class Store:
         return self.conn.execute(
             "SELECT * FROM file_metrics WHERE run_id = ? ORDER BY cc_total DESC", (run_id,)
         ).fetchall()
+
+    # ---------------- graph ----------------
+
+    def insert_dependencies(self, run_id: int, edges) -> None:
+        self.conn.executemany(
+            "INSERT INTO dependencies (run_id, from_path, to_path, import_kind) VALUES (?,?,?,?)",
+            [(run_id, e.from_path, e.to_path, e.kind) for e in edges],
+        )
+        self.conn.commit()
+
+    def insert_cycles(self, run_id: int, cycles: list[list[str]]) -> None:
+        import json as _json
+        self.conn.executemany(
+            "INSERT INTO cycles (run_id, path_json, length) VALUES (?,?,?)",
+            [(run_id, _json.dumps(c), len(c)) for c in cycles],
+        )
+        self.conn.commit()
+
+    def insert_risk(self, run_id: int, rows: Sequence[dict[str, Any]]) -> None:
+        self.conn.executemany
+        self.conn.executemany(
+            """INSERT INTO risk_analysis (run_id, path, churn, blast_radius, risk_score, risk_level)
+               VALUES (?,?,?,?,?,?)""",
+            [(run_id, r["path"], r.get("churn", 0), r.get("blast_radius", 0),
+              r.get("risk_score", 0), r.get("risk_level")) for r in rows],
+        )
+        self.conn.commit()
+
+    def latest_run_id(self, repo_id: int) -> int | None:
+        row = self.conn.execute(
+            "SELECT run_id FROM runs WHERE repo_id=? AND status='completed' "
+            "ORDER BY run_id DESC LIMIT 1", (repo_id,)).fetchone()
+        return row["run_id"] if row else None
+
+    def cycles_for_run(self, run_id: int) -> list[sqlite3.Row]:
+        return self.conn.execute(
+            "SELECT * FROM cycles WHERE run_id = ? ORDER BY length", (run_id,)).fetchall()
+
+    def dependencies_for_run(self, run_id: int) -> list[sqlite3.Row]:
+        return self.conn.execute(
+            "SELECT * FROM dependencies WHERE run_id = ?", (run_id,)).fetchall()
+
+    def risk_for_run(self, run_id: int) -> list[sqlite3.Row]:
+        return self.conn.execute(
+            "SELECT * FROM risk_analysis WHERE run_id = ? ORDER BY risk_score DESC",
+            (run_id,)).fetchall()
