@@ -1,13 +1,22 @@
+"""Thin SQLite data-access layer. No ORM by design (SRS 2.1: local-only storage)."""
+
 from __future__ import annotations
+
+import json as _json
 import os
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Sequence
+
 SCHEMA_PATH = Path(__file__).with_name("schema.sql")
 DEFAULT_DB_NAME = "repohealth.db"
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
 class Store:
     def __init__(self, db_path: str | os.PathLike):
         self.db_path = Path(db_path)
@@ -17,16 +26,21 @@ class Store:
         self.conn.execute("PRAGMA foreign_keys = ON")
         self.conn.execute("PRAGMA journal_mode = WAL")
         self._migrate()
+
     def __enter__(self) -> "Store":
         return self
+
     def __exit__(self, *exc) -> None:
         self.close()
+
     def close(self) -> None:
         self.conn.commit()
         self.conn.close()
+
     def _migrate(self) -> None:
         self.conn.executescript(SCHEMA_PATH.read_text(encoding="utf-8"))
         self.conn.commit()
+
     def upsert_repo(self, path: str, name: str) -> int:
         cur = self.conn.execute("SELECT repo_id FROM repos WHERE path = ?", (path,))
         row = cur.fetchone()
@@ -38,6 +52,7 @@ class Store:
         )
         self.conn.commit()
         return int(cur.lastrowid)
+
     def insert_commits(self, repo_id: int, commits: Iterable[dict[str, Any]]) -> int:
         """commits: dicts with sha, author_name, author_email, authored_at,
         message, files -> [{path, lines_added, lines_deleted}]."""
@@ -87,12 +102,23 @@ class Store:
                ORDER BY churn DESC""",
             (repo_id,),
         ).fetchall()
+
+    def churn_for_path(self, repo_id: int, path: str) -> int:
+        row = self.conn.execute(
+            """SELECT COUNT(*) AS churn
+               FROM file_changes fc JOIN commits c ON c.commit_id = fc.commit_id
+               WHERE c.repo_id = ? AND fc.path = ?""",
+            (repo_id, path),
+        ).fetchone()
+        return int(row["churn"]) if row else 0
+
     def latest_commit_sha(self, repo_id: int) -> str | None:
         row = self.conn.execute(
             "SELECT sha FROM commits WHERE repo_id = ? ORDER BY authored_at DESC LIMIT 1",
             (repo_id,),
         ).fetchone()
         return row["sha"] if row else None
+
     def start_run(self, repo_id: int, commit_sha: str | None, kind: str = "full") -> int:
         cur = self.conn.execute(
             "INSERT INTO runs (repo_id, commit_sha, started_at, status, kind) VALUES (?,?,?,?,?)",
@@ -107,6 +133,7 @@ class Store:
             (_now(), status, run_id),
         )
         self.conn.commit()
+
     def insert_file_metrics(self, run_id: int, metrics: Sequence[dict[str, Any]]) -> None:
         self.conn.executemany(
             """INSERT INTO file_metrics
@@ -152,11 +179,22 @@ class Store:
             return None
         return sum(r["cc_total"] for r in rows) / len(rows)
 
+    def baselines_for_paths(
+        self, paths: Sequence[str], window: int = 5
+    ) -> dict[str, float]:
+        """Batched baseline lookup -- one query per path but a single connection
+        round trip each, used by the gatekeeper's fast path."""
+        out: dict[str, float] = {}
+        for p in paths:
+            b = self.baseline_cc(p, window)
+            if b is not None:
+                out[p] = b
+        return out
+
     def metrics_for_run(self, run_id: int) -> list[sqlite3.Row]:
         return self.conn.execute(
             "SELECT * FROM file_metrics WHERE run_id = ? ORDER BY cc_total DESC", (run_id,)
         ).fetchall()
-
 
     def insert_dependencies(self, run_id: int, edges) -> None:
         self.conn.executemany(
@@ -166,7 +204,6 @@ class Store:
         self.conn.commit()
 
     def insert_cycles(self, run_id: int, cycles: list[list[str]]) -> None:
-        import json as _json
         self.conn.executemany(
             "INSERT INTO cycles (run_id, path_json, length) VALUES (?,?,?)",
             [(run_id, _json.dumps(c), len(c)) for c in cycles],
@@ -174,7 +211,6 @@ class Store:
         self.conn.commit()
 
     def insert_risk(self, run_id: int, rows: Sequence[dict[str, Any]]) -> None:
-        self.conn.executemany
         self.conn.executemany(
             """INSERT INTO risk_analysis (run_id, path, churn, blast_radius, risk_score, risk_level)
                VALUES (?,?,?,?,?,?)""",
@@ -193,6 +229,14 @@ class Store:
         return self.conn.execute(
             "SELECT * FROM cycles WHERE run_id = ? ORDER BY length", (run_id,)).fetchall()
 
+    def cycle_signatures(self, run_id: int) -> set[frozenset[str]]:
+        """Cycle identities for the last run, so the gate can tell a NEW cycle
+        from one that already existed before this commit."""
+        return {
+            frozenset(_json.loads(r["path_json"]))
+            for r in self.cycles_for_run(run_id)
+        }
+
     def dependencies_for_run(self, run_id: int) -> list[sqlite3.Row]:
         return self.conn.execute(
             "SELECT * FROM dependencies WHERE run_id = ?", (run_id,)).fetchall()
@@ -201,3 +245,10 @@ class Store:
         return self.conn.execute(
             "SELECT * FROM risk_analysis WHERE run_id = ? ORDER BY risk_score DESC",
             (run_id,)).fetchall()
+
+    def blast_for_path(self, run_id: int, path: str) -> int:
+        row = self.conn.execute(
+            "SELECT blast_radius FROM risk_analysis WHERE run_id = ? AND path = ?",
+            (run_id, path),
+        ).fetchone()
+        return int(row["blast_radius"]) if row else 0

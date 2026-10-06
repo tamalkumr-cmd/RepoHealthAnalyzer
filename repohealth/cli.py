@@ -1,10 +1,11 @@
 """RepoHealth Analyzer CLI.
 
-    repohealth scan [PATH]     ingest git history, analyze complexity + dependencies
-    repohealth report [PATH]   churn / complexity / risk summary
-    repohealth cycles [PATH]   list circular import chains
-    repohealth graph [PATH]    export the dependency graph as JSON
-    repohealth check --staged  gatekeeper (phase 4 -- not wired yet)
+    repohealth scan [PATH]      ingest history, analyze complexity + dependencies
+    repohealth report [PATH]    churn / complexity / risk summary
+    repohealth cycles [PATH]    list circular import chains
+    repohealth graph [PATH]     export the dependency graph as JSON
+    repohealth init [PATH]      install the pre-commit gatekeeper
+    repohealth check --staged   run the gatekeeper (invoked by the hook)
 """
 
 from __future__ import annotations
@@ -21,6 +22,8 @@ from .analysis.cycles import find_cycles, format_cycle
 from .analysis.depgraph import build_graph
 from .config import load_config
 from .db.store import Store
+from .hooks import installer
+from .hooks.gate import run_gate
 from .ingest.git_log import NotAGitRepo, iter_commits, open_repo, python_files
 
 
@@ -64,7 +67,6 @@ def cmd_scan(args) -> int:
         files = python_files(repo, cfg["exclude_paths"])
         run_id = store.start_run(repo_id, store.latest_commit_sha(repo_id), kind="full")
 
-        # --- complexity ---
         metrics = analyze_paths(root, files, cfg["thresholds"])
         store.insert_file_metrics(run_id, [m.as_row() for m in metrics])
         failed = [m for m in metrics if not m.parsed]
@@ -72,13 +74,11 @@ def cmd_scan(args) -> int:
         for m in failed[:5]:
             print(f"  {C.YELLOW}skipped{C.RESET} {m.path}: {m.parse_error}")
 
-        # --- dependency graph ---
         graph = build_graph(root, files)
         store.insert_dependencies(run_id, graph.edges)
         adj, rev = graph.adjacency(), graph.reverse_adjacency()
         print(f"{C.CYAN}Graph{C.RESET} {len(graph.nodes)} nodes, {len(graph.edges)} internal edges")
 
-        # --- cycles ---
         found = find_cycles(adj)
         store.insert_cycles(run_id, found)
         if found:
@@ -90,11 +90,10 @@ def cmd_scan(args) -> int:
         else:
             print(f"{C.GREEN}Cycles{C.RESET} none detected")
 
-        # --- risk ---
         blast = blast_radius(rev)
         churn = {r["path"]: r["churn"] for r in store.churn(repo_id)}
         cc = {m.path: m.cc_total for m in metrics}
-        ranked = rank_fragile(blast, churn, cc, top=len(files))
+        ranked = rank_fragile(blast, churn, cc, top=len(files) or 1)
         all_scores = [int(r["risk_score"]) for r in ranked]
         for r in ranked:
             r["risk_level"] = risk_level(int(r["risk_score"]), all_scores)
@@ -173,9 +172,89 @@ def cmd_graph(args) -> int:
     return 0
 
 
-def cmd_check(args) -> int:
-    print(f"{C.YELLOW}Gatekeeper not implemented yet (phase 4).{C.RESET}")
+def cmd_init(args) -> int:
+    repo, root, cfg = _resolve(args.path)
+
+    if args.uninstall:
+        if installer.uninstall(repo):
+            print(f"{C.GREEN}Removed{C.RESET} the RepoHealth pre-commit hook.")
+        else:
+            print("No RepoHealth hook was installed.")
+        return 0
+
+    hook, action = installer.install(repo, force=args.force)
+
+    if action == "skipped":
+        print(f"{C.YELLOW}A different pre-commit hook already exists.{C.RESET}")
+        print(f"  {hook}")
+        print("  Re-run with --force to back it up and replace it.")
+        return 1
+
+    print(f"{C.GREEN}Hook {action}{C.RESET} at {hook}")
+    if action == "replaced":
+        print(f"  {C.DIM}previous hook saved as pre-commit.pre-repohealth{C.RESET}")
+
+    if installer.ensure_gitignored(repo, cfg["db_path"]):
+        print(f"  {C.DIM}added .repohealth/ to .gitignore{C.RESET}")
+
+    db_path = root / cfg["db_path"]
+    if db_path.exists():
+        print(f"{C.DIM}Baselines present. The gate is live on your next commit.{C.RESET}")
+    else:
+        print(f"{C.YELLOW}No baselines yet.{C.RESET} Run `repohealth scan` to establish them —")
+        print(f"  {C.DIM}until then the gate passes everything through.{C.RESET}")
+    print(f"{C.DIM}Bypass a single commit with: git commit --no-verify{C.RESET}")
     return 0
+
+
+def cmd_check(args) -> int:
+    result = run_gate(args.path, spike_override=args.spike)
+
+    if result.skipped_reason:
+        if args.verbose:
+            print(f"{C.DIM}repohealth: {result.skipped_reason}{C.RESET}")
+        return 0
+
+    for path, err in result.unparsed:
+        print(f"{C.YELLOW}repohealth: could not parse {path} ({err}) — not blocking{C.RESET}")
+
+    if result.passed:
+        if not args.quiet:
+            n = len(result.staged)
+            print(
+                f"{C.GREEN}repohealth: OK{C.RESET} {C.DIM}"
+                f"{n} staged file{'s' if n != 1 else ''}, "
+                f"{result.checked_baselines} checked against baseline, "
+                f"{result.elapsed:.2f}s{C.RESET}"
+            )
+        return 0
+
+    spikes = [v for v in result.violations if v.kind == "complexity_spike"]
+    newcyc = [v for v in result.violations if v.kind == "new_cycle"]
+
+    print()
+    print(f"{C.RED}{C.BOLD}  COMMIT BLOCKED — RepoHealth Gatekeeper{C.RESET}")
+    print(f"{C.RED}  {'─' * 56}{C.RESET}")
+
+    for v in spikes:
+        print(f"\n  {C.RED}✖{C.RESET} {C.BOLD}{v.path}{C.RESET}")
+        print(f"    {v.message}")
+        for line in v.detail:
+            print(f"    {C.DIM}·{C.RESET} {line}")
+
+    for v in newcyc:
+        print(f"\n  {C.RED}✖{C.RESET} {C.BOLD}new circular import{C.RESET}")
+        for line in v.detail:
+            print(f"    {C.DIM}·{C.RESET} {line}")
+
+    print(f"\n{C.RED}  {'─' * 56}{C.RESET}")
+    if spikes:
+        print(f"  {C.DIM}Extract the flagged functions, or split the file.{C.RESET}")
+    if newcyc:
+        print(f"  {C.DIM}Break the loop: move the shared code into a third module.{C.RESET}")
+    print(f"  {C.DIM}Intentional? Commit with: git commit --no-verify{C.RESET}")
+    print(f"  {C.DIM}Checked in {result.elapsed:.2f}s{C.RESET}\n")
+    return 1
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -202,9 +281,18 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--out", help="write to file instead of stdout")
     g.set_defaults(func=cmd_graph)
 
+    i = sub.add_parser("init", help="install the pre-commit gatekeeper")
+    i.add_argument("path", nargs="?", default=".")
+    i.add_argument("--force", action="store_true", help="back up and replace an existing hook")
+    i.add_argument("--uninstall", action="store_true")
+    i.set_defaults(func=cmd_init)
+
     c = sub.add_parser("check", help="pre-commit gatekeeper")
     c.add_argument("path", nargs="?", default=".")
-    c.add_argument("--staged", action="store_true")
+    c.add_argument("--staged", action="store_true", help="check staged files (default)")
+    c.add_argument("--spike", type=float, help="override the spike threshold percentage")
+    c.add_argument("--quiet", action="store_true", help="print nothing when the check passes")
+    c.add_argument("--verbose", action="store_true", help="explain why a check was skipped")
     c.set_defaults(func=cmd_check)
     return p
 

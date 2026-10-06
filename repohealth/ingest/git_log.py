@@ -1,9 +1,4 @@
-"""Git repository ingestion & parsing (SRS 4.1).
-
-Walks the commit history and emits per-commit file-change records. Code churn
-itself is derived in SQL (Store.churn) rather than counted here, so re-running
-ingestion on new commits stays incremental.
-"""
+"""Git repository ingestion & parsing (SRS 4.1)."""
 
 from __future__ import annotations
 
@@ -40,8 +35,6 @@ def iter_commits(
 
     for commit in commits:
         files: list[dict[str, Any]] = []
-        # commit.stats runs a diff against the first parent; on merge commits
-        # this is intentionally the diff to parent[0] only.
         for path, stat in commit.stats.files.items():
             path = str(path).replace("\\", "/")
             if python_only and not path.endswith(".py"):
@@ -82,16 +75,45 @@ def python_files(repo: Repo, exclude: list[str] | None = None) -> list[str]:
 
 
 def staged_python_files(repo: Repo, exclude: list[str] | None = None) -> list[str]:
-    """Files staged for the pending commit — the gatekeeper's input (SRS 4.4)."""
+    """Python files staged for the pending commit -- the gatekeeper's input.
+
+    Uses `git diff --cached --name-only --diff-filter=ACMR`, which reports
+    exactly what the pending commit will contain. Deleted files are excluded
+    by the filter since there is nothing left to analyse.
+    """
     exclude = exclude or []
     try:
-        diff = repo.index.diff("HEAD")
+        out = repo.git.diff("--cached", "--name-only", "--diff-filter=ACMR")
     except Exception:
-        diff = repo.index.diff(None)
-    paths = set()
-    for d in diff:
-        for p in (d.a_path, d.b_path):
-            if p and p.endswith(".py") and not is_excluded(p, exclude):
-                paths.add(p.replace("\\", "/"))
+        return []
+
     root = Path(repo.working_tree_dir)
-    return sorted(p for p in paths if (root / p).is_file())
+    paths = []
+    for entry in out.splitlines():
+        entry = entry.strip().replace("\\", "/")
+        if not entry or not entry.endswith(".py"):
+            continue
+        if is_excluded(entry, exclude):
+            continue
+        if (root / entry).is_file():
+            paths.append(entry)
+    return sorted(set(paths))
+
+
+def staged_blob(repo: Repo, rel_path: str) -> str | None:
+    """Content of a file AS STAGED, not as it sits on disk.
+
+    These differ whenever the developer has edited a file further after
+    `git add`. The gate must judge what is actually being committed.
+    """
+    try:
+        return repo.git.show(f":{rel_path}")
+    except Exception:
+        return None
+
+
+def head_sha(repo: Repo) -> str | None:
+    try:
+        return repo.head.commit.hexsha
+    except Exception:
+        return None

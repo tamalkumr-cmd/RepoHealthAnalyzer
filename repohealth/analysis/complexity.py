@@ -1,9 +1,4 @@
-"""Static code analysis & complexity engine (SRS 4.2).
-
-Cyclomatic complexity comes from radon; nesting depth and class size come from
-a custom ast.NodeVisitor. Every parse is guarded — syntactically invalid files
-are recorded as unparsed rather than crashing the run (SRS 5.4.2).
-"""
+"""Static code analysis & complexity engine (SRS 4.2)."""
 
 from __future__ import annotations
 
@@ -13,10 +8,6 @@ from pathlib import Path
 from typing import Any
 
 from radon.complexity import cc_visit
-
-NESTING_NODES = (
-    ast.If, ast.For, ast.AsyncFor, ast.While, ast.With, ast.AsyncWith, ast.Try
-)
 
 
 class _StructureVisitor(ast.NodeVisitor):
@@ -28,7 +19,7 @@ class _StructureVisitor(ast.NodeVisitor):
         self.num_functions = 0
         self.num_classes = 0
         self.max_class_loc = 0
-        self.deep_functions: list[tuple[str, int, int]] = []  # name, lineno, depth
+        self.deep_functions: list[tuple[str, int, int]] = []
         self._fn_stack: list[list[Any]] = []
 
     def _descend(self, node: ast.AST) -> None:
@@ -118,7 +109,7 @@ def analyze_source(rel_path: str, source: str, thresholds: dict[str, Any] | None
 
     try:
         blocks = cc_visit(source)
-    except Exception as exc:  # radon raises assorted errors on odd input
+    except Exception as exc:
         blocks = []
         m.parse_error = f"radon: {type(exc).__name__}"
 
@@ -153,8 +144,7 @@ def analyze_file(root: str | Path, rel_path: str, thresholds: dict[str, Any] | N
     try:
         source = full.read_text(encoding="utf-8", errors="replace")
     except OSError as exc:
-        m = FileMetrics(path=rel_path, parsed=False, parse_error=f"unreadable: {exc}")
-        return m
+        return FileMetrics(path=rel_path, parsed=False, parse_error=f"unreadable: {exc}")
     return analyze_source(rel_path, source, thresholds)
 
 

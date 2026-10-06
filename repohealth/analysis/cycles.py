@@ -1,11 +1,24 @@
+"""Circular dependency detection (SRS 4.3.2.2).
+
+Iterative DFS with three-colour marking:
+    WHITE = unvisited, GRAY = on the current stack, BLACK = finished.
+An edge into a GRAY node is a back edge, and the cycle is the slice of the
+stack from that node onward. Iterative rather than recursive so a deep import
+chain cannot blow the Python recursion limit.
+"""
+
 from __future__ import annotations
+
 WHITE, GRAY, BLACK = 0, 1, 2
+
+
 def find_cycles(adjacency: dict[str, list[str]]) -> list[list[str]]:
     color: dict[str, int] = {n: WHITE for n in adjacency}
     stack: list[str] = []
     stack_pos: dict[str, int] = {}
     found: list[list[str]] = []
     seen_signatures: set[frozenset[str]] = set()
+
     def record(cycle: list[str]) -> None:
         sig = frozenset(cycle)
         if sig in seen_signatures:
@@ -13,6 +26,7 @@ def find_cycles(adjacency: dict[str, list[str]]) -> list[list[str]]:
         seen_signatures.add(sig)
         pivot = cycle.index(min(cycle))
         found.append(cycle[pivot:] + cycle[:pivot])
+
     for start in adjacency:
         if color[start] != WHITE:
             continue
@@ -20,6 +34,7 @@ def find_cycles(adjacency: dict[str, list[str]]) -> list[list[str]]:
         color[start] = GRAY
         stack_pos[start] = len(stack)
         stack.append(start)
+
         while work:
             node, i = work[-1]
             neighbours = adjacency.get(node, [])
@@ -40,8 +55,14 @@ def find_cycles(adjacency: dict[str, list[str]]) -> list[list[str]]:
                 color[node] = BLACK
                 del stack_pos[node]
                 stack.pop()
+
     return sorted(found, key=lambda c: (len(c), c))
+
+
 def format_cycle(cycle: list[str]) -> str:
+    """['a.py','b.py'] -> 'a.py -> b.py -> a.py'"""
     return " -> ".join(cycle + [cycle[0]])
+
+
 def files_in_cycles(cycles: list[list[str]]) -> set[str]:
     return {node for cycle in cycles for node in cycle}

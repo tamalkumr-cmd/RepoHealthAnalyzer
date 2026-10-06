@@ -1,9 +1,4 @@
-"""Dependency graph construction (SRS 4.3.2.1).
-
-Builds a module index from the repo's Python files, then resolves every import
-statement against it. Imports that do not resolve to a file inside the repo are
-third-party or stdlib and are dropped -- they are not nodes in the graph.
-"""
+"""Dependency graph construction (SRS 4.3.2.1)."""
 
 from __future__ import annotations
 
@@ -36,7 +31,6 @@ def build_module_index(paths: list[str]) -> dict[str, str]:
 
 
 def _package_of(rel_path: str) -> str:
-    """Dotted package containing this file, for relative-import resolution."""
     p = rel_path.replace("\\", "/")
     if p.endswith("/__init__.py") or p == "__init__.py":
         return module_name(p)
@@ -60,7 +54,7 @@ def _resolve(target: str, index: dict[str, str]) -> str | None:
 class Edge:
     from_path: str
     to_path: str
-    kind: str  # "import" | "from" | "relative"
+    kind: str
 
 
 @dataclass
@@ -108,7 +102,7 @@ def extract_imports(rel_path: str, source: str, index: dict[str, str]) -> tuple[
             unresolved.append(target)
             return
         if hit == rel_path:
-            return  # self-import, not a real edge
+            return
         key = (rel_path, hit)
         if key in seen:
             return
@@ -122,7 +116,6 @@ def extract_imports(rel_path: str, source: str, index: dict[str, str]) -> tuple[
 
         elif isinstance(node, ast.ImportFrom):
             if node.level and node.level > 0:
-                # relative: from . import x  /  from ..pkg import y
                 base_parts = pkg.split(".") if pkg else []
                 up = node.level - 1
                 base_parts = base_parts[: len(base_parts) - up] if up else base_parts
@@ -132,7 +125,6 @@ def extract_imports(rel_path: str, source: str, index: dict[str, str]) -> tuple[
                     continue
                 hit = _resolve(target, index)
                 if hit is None:
-                    # `from . import sibling` -- each alias is its own module
                     for alias in node.names:
                         add(f"{target}.{alias.name}" if target else alias.name, "relative")
                 elif hit != rel_path:
@@ -150,7 +142,6 @@ def extract_imports(rel_path: str, source: str, index: dict[str, str]) -> tuple[
                             seen.add(key)
                             edges.append(Edge(rel_path, hit, "from"))
                 else:
-                    # `from pkg import mod` where pkg is a package directory
                     for alias in node.names:
                         add(f"{base}.{alias.name}" if base else alias.name, "from")
 
@@ -172,5 +163,32 @@ def build_graph(root: str | Path, paths: list[str]) -> DependencyGraph:
         for name in unresolved:
             top = name.split(".")[0]
             graph.unresolved[top] = graph.unresolved.get(top, 0) + 1
+
+    return graph
+
+
+def build_graph_with_overrides(
+    root: str | Path, paths: list[str], overrides: dict[str, str]
+) -> DependencyGraph:
+    """Same as build_graph, but `overrides` supplies source text for selected
+    paths instead of reading from disk.
+
+    The gatekeeper needs this: it must build the graph from the STAGED content
+    of modified files, not from the working tree, which may have moved on.
+    """
+    index = build_module_index(paths)
+    graph = DependencyGraph(nodes=sorted(paths))
+    root = Path(root)
+
+    for rel in paths:
+        if rel in overrides:
+            source = overrides[rel]
+        else:
+            try:
+                source = (root / rel).read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+        edges, _ = extract_imports(rel, source, index)
+        graph.edges.extend(edges)
 
     return graph
