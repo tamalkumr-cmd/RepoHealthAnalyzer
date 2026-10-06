@@ -8,9 +8,16 @@ from pathlib import Path
 from typing import Any
 
 
-def module_name(rel_path: str) -> str:
-    """pkg/sub/mod.py -> pkg.sub.mod ; pkg/__init__.py -> pkg"""
+def module_name(rel_path: str, source_root: str = "") -> str:
+    """pkg/sub/mod.py -> pkg.sub.mod ; pkg/__init__.py -> pkg
+
+    `source_root` is the directory imports are resolved relative to. Under a
+    `src/` layout the file src/myapp/app.py is imported as `myapp.app`, not
+    `src.myapp.app`, so the root prefix is stripped first.
+    """
     p = rel_path.replace("\\", "/")
+    if source_root and p.startswith(source_root + "/"):
+        p = p[len(source_root) + 1:]
     if p.endswith("/__init__.py"):
         p = p[: -len("/__init__.py")]
     elif p == "__init__.py":
@@ -20,20 +27,60 @@ def module_name(rel_path: str) -> str:
     return p.replace("/", ".")
 
 
+def source_root_for(rel_path: str, pathset: set[str]) -> str:
+    """The directory this file's imports are resolved against.
+
+    Walks up from the file while each ancestor directory is a package (has an
+    __init__.py). The first ancestor that is NOT a package is the source root:
+    that is the directory Python itself would have on sys.path.
+
+        src/myapp/core/config.py  with __init__.py in myapp/ and core/  -> "src"
+        pkg/core/settings.py      with __init__.py in pkg/ and core/    -> ""
+        scripts/build.py          with no __init__.py anywhere          -> "scripts"
+    """
+    parts = rel_path.replace("\\", "/").split("/")
+    d = len(parts) - 1
+    while d > 0:
+        if "/".join(parts[:d]) + "/__init__.py" in pathset:
+            d -= 1
+        else:
+            break
+    return "/".join(parts[:d])
+
+
 def build_module_index(paths: list[str]) -> dict[str, str]:
-    """module name -> repo-relative file path."""
+    """module name -> repo-relative file path.
+
+    Each file is registered under its source-root-relative name. The
+    repo-root-relative name is also registered when it does not collide, so
+    monorepos that import across roots both ways still resolve.
+    """
+    pathset = set(p.replace("\\", "/") for p in paths)
     index: dict[str, str] = {}
+    fallback: dict[str, str] = {}
+
     for p in paths:
-        name = module_name(p)
-        if name:
-            index[name] = p
+        root = source_root_for(p, pathset)
+        primary = module_name(p, root)
+        if primary:
+            index.setdefault(primary, p)
+        if root:
+            alt = module_name(p, "")
+            if alt and alt != primary:
+                fallback.setdefault(alt, p)
+
+    for name, p in fallback.items():
+        index.setdefault(name, p)
     return index
 
 
-def _package_of(rel_path: str) -> str:
+def _package_of(rel_path: str, source_root: str = "") -> str:
+    """Dotted package containing this file, for relative-import resolution."""
     p = rel_path.replace("\\", "/")
     if p.endswith("/__init__.py") or p == "__init__.py":
-        return module_name(p)
+        return module_name(p, source_root)
+    if source_root and p.startswith(source_root + "/"):
+        p = p[len(source_root) + 1:]
     parent = "/".join(p.split("/")[:-1])
     return parent.replace("/", ".") if parent else ""
 
@@ -84,7 +131,9 @@ class DependencyGraph:
         }
 
 
-def extract_imports(rel_path: str, source: str, index: dict[str, str]) -> tuple[list[Edge], list[str]]:
+def extract_imports(
+    rel_path: str, source: str, index: dict[str, str], source_root: str = ""
+) -> tuple[list[Edge], list[str]]:
     """Returns (resolved edges, unresolved module names). Never raises."""
     try:
         tree = ast.parse(source, filename=rel_path)
@@ -93,7 +142,7 @@ def extract_imports(rel_path: str, source: str, index: dict[str, str]) -> tuple[
 
     edges: list[Edge] = []
     unresolved: list[str] = []
-    pkg = _package_of(rel_path)
+    pkg = _package_of(rel_path, source_root)
     seen: set[tuple[str, str]] = set()
 
     def add(target: str, kind: str) -> None:
@@ -150,6 +199,7 @@ def extract_imports(rel_path: str, source: str, index: dict[str, str]) -> tuple[
 
 def build_graph(root: str | Path, paths: list[str]) -> DependencyGraph:
     index = build_module_index(paths)
+    pathset = set(p.replace("\\", "/") for p in paths)
     graph = DependencyGraph(nodes=sorted(paths))
     root = Path(root)
 
@@ -158,7 +208,9 @@ def build_graph(root: str | Path, paths: list[str]) -> DependencyGraph:
             source = (root / rel).read_text(encoding="utf-8", errors="replace")
         except OSError:
             continue
-        edges, unresolved = extract_imports(rel, source, index)
+        edges, unresolved = extract_imports(
+            rel, source, index, source_root_for(rel, pathset)
+        )
         graph.edges.extend(edges)
         for name in unresolved:
             top = name.split(".")[0]
@@ -177,6 +229,7 @@ def build_graph_with_overrides(
     of modified files, not from the working tree, which may have moved on.
     """
     index = build_module_index(paths)
+    pathset = set(p.replace("\\", "/") for p in paths)
     graph = DependencyGraph(nodes=sorted(paths))
     root = Path(root)
 
@@ -188,7 +241,9 @@ def build_graph_with_overrides(
                 source = (root / rel).read_text(encoding="utf-8", errors="replace")
             except OSError:
                 continue
-        edges, _ = extract_imports(rel, source, index)
+        edges, _ = extract_imports(
+            rel, source, index, source_root_for(rel, pathset)
+        )
         graph.edges.extend(edges)
 
     return graph

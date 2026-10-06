@@ -21,6 +21,10 @@ DEFAULTS: dict[str, Any] = {
         "min_baseline_cc": 5,
         "block_new_cycles": True,
         "max_staged_files": 50,
+        # A file with no recorded history has nothing to compare against.
+        # Passing is deliberate: blocking a developer's first commit to a new
+        # file would be hostile, and the baseline exists by the second commit.
+        "allow_unbaselined": True,
     },
     "thresholds": {
         "max_cc_per_function": 10,
