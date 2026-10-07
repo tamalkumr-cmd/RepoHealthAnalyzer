@@ -252,3 +252,23 @@ class Store:
             (run_id, path),
         ).fetchone()
         return int(row["blast_radius"]) if row else 0
+
+    def insert_health(self, run_id: int, breakdown: dict[str, Any]) -> None:
+        c = breakdown.get("contributions", {})
+        self.conn.execute(
+            """INSERT INTO health_scores
+               (run_id, score, churn_penalty, cc_penalty, cycle_penalty, computed_at)
+               VALUES (?,?,?,?,?,?)""",
+            (run_id, breakdown["score"], c.get("churn_complexity", 0.0),
+             c.get("blast_radius", 0.0), c.get("cycles", 0.0), _now()),
+        )
+        self.conn.commit()
+
+    def health_history(self, repo_id: int, limit: int = 50) -> list[sqlite3.Row]:
+        return self.conn.execute(
+            """SELECT h.*, r.completed_at FROM health_scores h
+               JOIN runs r ON r.run_id = h.run_id
+               WHERE r.repo_id = ? AND r.status = 'completed'
+               ORDER BY h.run_id DESC LIMIT ?""",
+            (repo_id, limit),
+        ).fetchall()

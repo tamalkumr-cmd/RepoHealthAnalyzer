@@ -20,6 +20,7 @@ from .analysis.blast import blast_radius, direct_dependents, rank_fragile, risk_
 from .analysis.complexity import analyze_paths
 from .analysis.cycles import find_cycles, format_cycle
 from .analysis.depgraph import build_graph
+from .analysis.scoring import compute_health, refactor_estimate
 from .config import load_config
 from .db.store import Store
 from .hooks import installer
@@ -99,7 +100,16 @@ def cmd_scan(args) -> int:
             r["risk_level"] = risk_level(int(r["risk_score"]), all_scores)
         store.insert_risk(run_id, ranked)
 
+        breakdown = compute_health(
+            [m.as_row() for m in metrics], churn,
+            {r["path"]: r["blast_radius"] for r in ranked}, found, cfg,
+        )
+        store.insert_health(run_id, breakdown.as_dict())
         store.finish_run(run_id)
+
+        colour = C.GREEN if breakdown.score >= 80 else C.YELLOW if breakdown.score >= 60 else C.RED
+        print(f"{C.BOLD}Health{C.RESET} {colour}{breakdown.score:.0f}/100 "
+              f"({breakdown.grade}){C.RESET}")
         print(f"{C.DIM}Run #{run_id} completed in {time.perf_counter() - started:.2f}s{C.RESET}")
     return 0
 
@@ -257,6 +267,66 @@ def cmd_check(args) -> int:
     return 1
 
 
+def cmd_score(args) -> int:
+    repo, root, cfg = _resolve(args.path)
+    with Store(_require_db(root, cfg)) as store:
+        repo_id = store.upsert_repo(str(root), root.name)
+        run_id = store.latest_run_id(repo_id)
+        if run_id is None:
+            print("No completed runs.")
+            return 1
+        metrics = [dict(m) for m in store.metrics_for_run(run_id)]
+        churn = {r["path"]: r["churn"] for r in store.churn(repo_id)}
+        cycles = [json.loads(r["path_json"]) for r in store.cycles_for_run(run_id)]
+        risk = [dict(r) for r in store.risk_for_run(run_id)]
+        blast = {r["path"]: r["blast_radius"] for r in risk}
+
+    bd = compute_health(metrics, churn, blast, cycles, cfg)
+    colour = C.GREEN if bd.score >= 80 else C.YELLOW if bd.score >= 60 else C.RED
+
+    print(f"\n  {C.BOLD}Repository Health{C.RESET}  {colour}{C.BOLD}{bd.score:.0f}/100  "
+          f"grade {bd.grade}{C.RESET}\n")
+    print(f"  {'signal':<20} {'penalty':>8} {'weight':>7} {'points lost':>12}")
+    print(f"  {'-' * 50}")
+    for k in bd.penalties:
+        print(f"  {k:<20} {bd.penalties[k]:>8.2f} {bd.weights[k]:>7.2f} "
+              f"{bd.contributions[k]:>12.1f}")
+    f = bd.facts
+    print(f"\n  {C.DIM}{f['files']} files · {f['hotspot_files']} churn+complexity hotspots · "
+          f"{f['cycle_count']} cycles touching {f['files_in_cycles']} files · "
+          f"{f['fragile_files']} fragile{C.RESET}")
+
+    if args.effort:
+        mt = {m["path"]: m for m in metrics}
+        in_cycle = {p for c in cycles for p in c}
+        ests = [
+            refactor_estimate(mt[r["path"]], cfg["thresholds"], r["path"] in in_cycle)
+            for r in risk if r["path"] in mt
+        ]
+        ests = [e for e in ests if e["hours"] > 0]
+        ests.sort(key=lambda e: e["hours"], reverse=True)
+        if ests:
+            print(f"\n  {C.BOLD}Refactoring candidates{C.RESET}  "
+                  f"{C.DIM}(~{sum(e['hours'] for e in ests):.0f}h total, heuristic){C.RESET}\n")
+            for e in ests[: args.top]:
+                print(f"  {e['hours']:>5.1f}h  {e['path'][:46]:<46} {C.DIM}{e['band']}{C.RESET}")
+                for d in e["drivers"]:
+                    print(f"         {C.DIM}· {d}{C.RESET}")
+    print()
+    return 0
+
+
+def cmd_serve(args) -> int:
+    from .api.server import serve
+    repo, root, cfg = _resolve(args.path)
+    _require_db(root, cfg)
+    print(f"{C.CYAN}RepoHealth{C.RESET} serving {root.name} at "
+          f"{C.BOLD}http://{args.host}:{args.port}{C.RESET}")
+    print(f"{C.DIM}API docs at /api/docs · Ctrl+C to stop{C.RESET}")
+    serve(args.path, host=args.host, port=args.port)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="repohealth", description=__doc__)
     p.add_argument("--no-color", action="store_true")
@@ -286,6 +356,18 @@ def build_parser() -> argparse.ArgumentParser:
     i.add_argument("--force", action="store_true", help="back up and replace an existing hook")
     i.add_argument("--uninstall", action="store_true")
     i.set_defaults(func=cmd_init)
+
+    sc = sub.add_parser("score", help="repository health score with breakdown")
+    sc.add_argument("path", nargs="?", default=".")
+    sc.add_argument("--effort", action="store_true", help="list refactoring estimates")
+    sc.add_argument("--top", type=int, default=10)
+    sc.set_defaults(func=cmd_score)
+
+    sv = sub.add_parser("serve", help="run the local dashboard API")
+    sv.add_argument("path", nargs="?", default=".")
+    sv.add_argument("--host", default="127.0.0.1")
+    sv.add_argument("--port", type=int, default=8000)
+    sv.set_defaults(func=cmd_serve)
 
     c = sub.add_parser("check", help="pre-commit gatekeeper")
     c.add_argument("path", nargs="?", default=".")

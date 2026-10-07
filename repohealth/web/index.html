@@ -1,0 +1,648 @@
+<!doctype html>
+<html lang="en" data-theme="auto">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RepoHealth</title>
+<!-- No external requests: d3 is served from this machine and type uses the
+     system stack, so the dashboard works with the network off. -->
+<script src="/static/d3.min.js"></script>
+<style>
+:root{
+  color-scheme: light;
+  --surface:#FAFAFC; --raised:#FFFFFF; --sunken:#F2F3F7;
+  --ink:#15171C; --ink-2:#5A6070; --ink-3:#878DA0;
+  --rule:#E2E5EC; --rule-strong:#CBD0DC;
+  --accent:#2a78d6;
+  --r1:#E9A79F; --r2:#CE5B50; --r3:#9E241D;
+  --ok:#0ca30c;
+  --shadow:0 1px 2px rgba(21,23,28,.06);
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    color-scheme: dark;
+    --surface:#14161B; --raised:#1B1E25; --sunken:#101217;
+    --ink:#E9ECF3; --ink-2:#99A0B0; --ink-3:#6E7585;
+    --rule:#2A2E38; --rule-strong:#3B4050;
+    --accent:#3987e5;
+    --r1:#7E423B; --r2:#C9594E; --r3:#F0958B;
+    --ok:#3ec93e;
+    --shadow:0 1px 2px rgba(0,0,0,.4);
+  }
+}
+:root[data-theme="dark"]{
+  color-scheme: dark;
+  --surface:#14161B; --raised:#1B1E25; --sunken:#101217;
+  --ink:#E9ECF3; --ink-2:#99A0B0; --ink-3:#6E7585;
+  --rule:#2A2E38; --rule-strong:#3B4050;
+  --accent:#3987e5;
+  --r1:#7E423B; --r2:#C9594E; --r3:#F0958B;
+  --ok:#3ec93e;
+  --shadow:0 1px 2px rgba(0,0,0,.4);
+}
+
+*{box-sizing:border-box}
+html,body{margin:0;padding:0}
+body{
+  background:var(--surface); color:var(--ink);
+  font-family:ui-sans-serif,-apple-system,"Segoe UI Variable Text","Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
+  font-size:15px; line-height:1.5;
+  -webkit-font-smoothing:antialiased;
+}
+.mono{font-family:ui-monospace,"SF Mono","Cascadia Mono","JetBrains Mono","Roboto Mono",Menlo,Consolas,monospace;font-variant-ligatures:none}
+.num{font-family:ui-monospace,"SF Mono","Cascadia Mono","JetBrains Mono","Roboto Mono",Menlo,Consolas,monospace;font-variant-numeric:tabular-nums}
+
+.wrap{max-width:1180px;margin:0 auto;padding:0 16px}
+
+/* ---------- header ---------- */
+header{border-bottom:1px solid var(--rule);background:var(--raised)}
+.bar{display:flex;align-items:baseline;gap:20px;padding:14px 0;flex-wrap:wrap}
+.brand{font-weight:600;letter-spacing:-.01em;margin:0;font-size:16px}
+.brand span{color:var(--ink-3);font-weight:400}
+.bar .meta{color:var(--ink-2);font-size:13px;display:flex;gap:18px;margin-left:auto;align-items:baseline;flex-wrap:wrap}
+button.ghost{
+  font:inherit;font-size:13px;color:var(--ink-2);background:none;
+  border:1px solid var(--rule-strong);border-radius:4px;padding:3px 9px;cursor:pointer;
+}
+button.ghost:hover{color:var(--ink);border-color:var(--ink-3)}
+button.ghost:focus-visible,a:focus-visible,th[role=button]:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+
+/* ---------- hero: score and its derivation ---------- */
+.hero{display:grid;grid-template-columns:minmax(200px,260px) 1fr;gap:40px;padding:36px 0 32px;align-items:start}
+.scorebox .figure{font-size:88px;line-height:.9;font-weight:600;letter-spacing:-.04em;font-family:ui-monospace,"SF Mono","Cascadia Mono","JetBrains Mono","Roboto Mono",Menlo,Consolas,monospace;font-variant-numeric:tabular-nums}
+.scorebox .of{font-size:22px;color:var(--ink-3);font-weight:400}
+.scorebox .grade{margin-top:10px;font-size:14px;color:var(--ink-2)}
+.scorebox .grade b{color:var(--ink);font-weight:600}
+.derivation h2,.panel h2{font-size:13px;font-weight:600;margin:0 0 14px;color:var(--ink-2)}
+.pen{display:grid;grid-template-columns:132px 1fr 62px;gap:12px;align-items:center;margin-bottom:9px;font-size:13px}
+.pen .track{display:block;height:9px;background:var(--sunken);border-radius:0 5px 5px 0;position:relative;overflow:hidden}
+.pen .fill{display:block;height:100%;background:var(--accent);border-radius:0 5px 5px 0;transition:width .5s cubic-bezier(.2,.7,.3,1)}
+.pen .val{text-align:right;color:var(--ink-2)}
+.facts{margin-top:18px;padding-top:14px;border-top:1px solid var(--rule);color:var(--ink-2);font-size:13px;display:flex;gap:22px;flex-wrap:wrap}
+.facts b{color:var(--ink);font-weight:600}
+
+/* ---------- sections ---------- */
+section{padding:30px 0;border-top:1px solid var(--rule)}
+.shead{display:flex;align-items:baseline;gap:14px;margin-bottom:18px;flex-wrap:wrap}
+.shead h2{font-size:17px;font-weight:600;margin:0;letter-spacing:-.01em}
+.shead p{margin:0;color:var(--ink-2);font-size:13px}
+.shead .right{margin-left:auto;display:flex;gap:10px;align-items:center}
+
+/* ---------- graph ---------- */
+#graph{width:100%;height:520px;background:var(--raised);border:1px solid var(--rule);border-radius:6px;display:block;touch-action:none}
+.node{cursor:pointer;stroke:var(--raised);stroke-width:1.5}
+.node.dim{opacity:.12}
+.link{stroke:var(--rule-strong);stroke-width:1;fill:none}
+.link.cyc{stroke:var(--r3);stroke-width:1.6}
+.link.hot{stroke:var(--accent);stroke-width:2}
+.link.dim{opacity:.07}
+.nlabel{font-family:ui-monospace,"SF Mono","Cascadia Mono","JetBrains Mono","Roboto Mono",Menlo,Consolas,monospace;font-size:9px;fill:var(--ink-2);pointer-events:none}
+.nlabel.dim{opacity:.1}
+.key{display:flex;gap:16px;color:var(--ink-2);font-size:12px;align-items:center;flex-wrap:wrap}
+.key i{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:5px;vertical-align:-1px}
+.ramp{display:inline-flex;align-items:center;gap:0;vertical-align:-2px}
+.ramp b{width:16px;height:9px;display:inline-block}
+
+/* ---------- two-up ---------- */
+.two{display:grid;grid-template-columns:1.15fr .85fr;gap:28px}
+.panel{background:var(--raised);border:1px solid var(--rule);border-radius:6px;padding:18px}
+#scatter{width:100%;height:290px;display:block}
+.axlabel{font-size:11px;fill:var(--ink-3)}
+.tick line{stroke:var(--rule)}
+.tick text{fill:var(--ink-3);font-size:10px;font-family:ui-monospace,"SF Mono","Cascadia Mono","JetBrains Mono","Roboto Mono",Menlo,Consolas,monospace}
+.domain{stroke:var(--rule-strong)}
+.dot{cursor:pointer;stroke:var(--raised);stroke-width:1.5}
+
+.cyclist{list-style:none;margin:0;padding:0;max-height:290px;overflow-y:auto}
+.cyclist li{padding:9px 0;border-bottom:1px solid var(--rule);font-size:12px}
+.cyclist li:last-child{border-bottom:0}
+.cyclist .chain{font-family:ui-monospace,"SF Mono","Cascadia Mono","JetBrains Mono","Roboto Mono",Menlo,Consolas,monospace;color:var(--ink);word-break:break-all;line-height:1.7}
+.cyclist .chain em{color:var(--ink-3);font-style:normal;padding:0 3px}
+.cyclist .len{color:var(--ink-3);font-size:11px}
+.clean{color:var(--ok);font-size:13px;display:flex;gap:7px;align-items:center;padding:10px 0}
+
+/* ---------- table ---------- */
+table{width:100%;border-collapse:collapse;font-size:13px}
+th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--rule)}
+th{font-size:11px;font-weight:600;color:var(--ink-2);border-bottom:1px solid var(--rule-strong);white-space:nowrap}
+th[role=button]{cursor:pointer;user-select:none}
+th[role=button]:hover{color:var(--ink)}
+th.r,td.r{text-align:right}
+tbody tr{cursor:pointer}
+tbody tr:hover{background:var(--sunken)}
+tbody tr.on{background:var(--sunken)}
+td.path{font-family:ui-monospace,"SF Mono","Cascadia Mono","JetBrains Mono","Roboto Mono",Menlo,Consolas,monospace;font-size:12px;max-width:340px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.lvl{display:inline-flex;align-items:center;gap:6px;white-space:nowrap}
+.lvl i{width:8px;height:8px;border-radius:50%;flex:none}
+.cyc-tag{font-size:10px;color:var(--r3);border:1px solid currentColor;border-radius:3px;padding:0 4px;margin-left:6px;vertical-align:1px}
+.drv{color:var(--ink-3);font-size:11px}
+
+/* ---------- config ---------- */
+.cfg{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:16px}
+.cfg label{display:block;font-size:12px;color:var(--ink-2);margin-bottom:5px}
+.cfg input{
+  width:100%;font-family:ui-monospace,"SF Mono","Cascadia Mono","JetBrains Mono","Roboto Mono",Menlo,Consolas,monospace;font-size:13px;padding:6px 8px;
+  background:var(--surface);color:var(--ink);border:1px solid var(--rule-strong);border-radius:4px;
+}
+.cfg input:focus{outline:2px solid var(--accent);outline-offset:-1px;border-color:transparent}
+.cfgfoot{margin-top:16px;display:flex;gap:12px;align-items:center}
+button.primary{
+  font:inherit;font-size:13px;font-weight:500;background:var(--accent);color:#fff;
+  border:0;border-radius:4px;padding:7px 14px;cursor:pointer;
+}
+button.primary:hover{filter:brightness(1.08)}
+button.primary:focus-visible{outline:2px solid var(--ink);outline-offset:2px}
+.saved{color:var(--ok);font-size:13px;opacity:0;transition:opacity .2s}
+.saved.show{opacity:1}
+
+/* ---------- tooltip ---------- */
+#tip{
+  position:fixed;pointer-events:none;z-index:50;opacity:0;transition:opacity .1s;
+  background:var(--raised);border:1px solid var(--rule-strong);border-radius:5px;
+  box-shadow:var(--shadow);padding:9px 11px;font-size:12px;max-width:290px;
+}
+#tip.show{opacity:1}
+#tip .tp{font-family:ui-monospace,"SF Mono","Cascadia Mono","JetBrains Mono","Roboto Mono",Menlo,Consolas,monospace;font-size:11px;color:var(--ink);word-break:break-all;margin-bottom:5px}
+#tip dl{margin:0;display:grid;grid-template-columns:auto auto;gap:1px 12px;font-size:11px}
+#tip dt{color:var(--ink-2)}
+#tip dd{margin:0;text-align:right;font-family:ui-monospace,"SF Mono","Cascadia Mono","JetBrains Mono","Roboto Mono",Menlo,Consolas,monospace}
+
+.err{padding:40px 0;color:var(--ink-2);font-size:14px}
+.err code{font-family:ui-monospace,"SF Mono","Cascadia Mono","JetBrains Mono","Roboto Mono",Menlo,Consolas,monospace;background:var(--sunken);padding:2px 6px;border-radius:3px;color:var(--ink)}
+footer{border-top:1px solid var(--rule);padding:18px 0 40px;color:var(--ink-3);font-size:12px}
+
+@media (max-width:860px){
+  .hero{grid-template-columns:1fr;gap:26px;padding:26px 0}
+  .scorebox .figure{font-size:64px}
+  .two{grid-template-columns:1fr}
+  #graph{height:400px}
+  .pen{grid-template-columns:96px 1fr 50px}
+}
+@media (prefers-reduced-motion:reduce){*{transition:none!important}}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="wrap bar">
+    <h1 class="brand">RepoHealth <span id="repo">—</span></h1>
+    <div class="meta">
+      <span id="runmeta"></span>
+      <button class="ghost" id="theme" aria-label="Switch colour theme">Theme</button>
+    </div>
+  </div>
+</header>
+
+<main class="wrap" id="main" hidden>
+
+  <div class="hero">
+    <div class="scorebox">
+      <div><span class="figure" id="score">—</span><span class="of">/100</span></div>
+      <div class="grade">Grade <b id="grade">—</b> · <span id="verdict"></span></div>
+    </div>
+    <div class="derivation">
+      <h2>Where the points went</h2>
+      <div id="pens"></div>
+      <div class="facts" id="facts"></div>
+    </div>
+  </div>
+
+  <section>
+    <div class="shead">
+      <h2>Dependency graph</h2>
+      <p>Node size is blast radius. Drag to rearrange, click to inspect. <span id="gcount"></span></p>
+      <div class="right key">
+        <span>risk
+          <span class="ramp"><b style="background:var(--r1)"></b><b style="background:var(--r2)"></b><b style="background:var(--r3)"></b></span>
+          low to high
+        </span>
+        <span><svg width="22" height="8"><line x1="1" y1="4" x2="21" y2="4" stroke="var(--r3)" stroke-width="1.6"/></svg> in a cycle</span>
+      </div>
+    </div>
+    <svg id="graph" role="img" aria-label="Force-directed dependency graph"></svg>
+  </section>
+
+  <section>
+    <div class="two">
+      <div class="panel">
+        <h2>Churn against complexity</h2>
+        <svg id="scatter" role="img" aria-label="Scatter plot of code churn against cyclomatic complexity"></svg>
+        <p class="drv" style="margin:6px 0 0">Top right is where debt accrues: files that are both edited often and complex.</p>
+      </div>
+      <div class="panel">
+        <h2>Circular imports</h2>
+        <div id="cycles"></div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="shead">
+      <h2>Files by risk</h2>
+      <p id="tcount"></p>
+    </div>
+    <div style="overflow-x:auto">
+      <table id="files">
+        <thead><tr>
+          <th role="button" data-k="path" tabindex="0">File</th>
+          <th role="button" data-k="churn" class="r" tabindex="0">Churn</th>
+          <th role="button" data-k="cc_total" class="r" tabindex="0">Complexity</th>
+          <th role="button" data-k="max_nesting" class="r" tabindex="0">Nesting</th>
+          <th role="button" data-k="blast_radius" class="r" tabindex="0">Blast radius</th>
+          <th role="button" data-k="hours" class="r" tabindex="0">Est. effort</th>
+          <th role="button" data-k="risk_score" tabindex="0">Risk</th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <button class="ghost" id="more" hidden style="margin-top:14px"></button>
+  </section>
+
+  <section>
+    <div class="shead">
+      <h2>Gatekeeper thresholds</h2>
+      <p>Saved to config.json in the analysed repository. Takes effect on the next commit.</p>
+    </div>
+    <div class="panel">
+      <div class="cfg" id="cfg"></div>
+      <div class="cfgfoot">
+        <button class="primary" id="save">Save thresholds</button>
+        <span class="saved" id="savedmsg">Saved</span>
+      </div>
+    </div>
+  </section>
+</main>
+
+<div class="wrap err" id="err" hidden></div>
+<footer class="wrap">Analysis runs locally. Nothing leaves this machine.</footer>
+<div id="tip" role="tooltip"></div>
+
+<script>
+const $ = s => document.querySelector(s);
+const esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const css = v => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+
+// risk is ordered magnitude -> sequential ramp; the text label always rides along
+const RISK = { low:'var(--r1)', medium:'var(--r2)', high:'var(--r3)' };
+const VERDICT = s => s>=90?'in good shape':s>=80?'holding up':s>=70?'showing strain':s>=60?'accumulating debt':'needs attention';
+
+let DATA = {};
+
+async function get(p){
+  const r = await fetch(p);
+  if(!r.ok) throw new Error((await r.json().catch(()=>({}))).detail || `${p} returned ${r.status}`);
+  return r.json();
+}
+
+// ---------- tooltip ----------
+const tip = $('#tip');
+function showTip(ev, title, rows){
+  tip.innerHTML = `<div class="tp">${esc(title)}</div><dl>` +
+    rows.map(([k,v])=>`<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join('') + `</dl>`;
+  tip.classList.add('show');
+  moveTip(ev);
+}
+function moveTip(ev){
+  const b = tip.getBoundingClientRect();
+  let x = ev.clientX + 14, y = ev.clientY + 14;
+  if(x + b.width > innerWidth - 8) x = ev.clientX - b.width - 14;
+  if(y + b.height > innerHeight - 8) y = ev.clientY - b.height - 14;
+  tip.style.left = x+'px'; tip.style.top = y+'px';
+}
+const hideTip = () => tip.classList.remove('show');
+
+// ---------- hero ----------
+const LABEL = {
+  churn_complexity:'Churn + complexity',
+  cycles:'Circular imports',
+  blast_radius:'Fragile dependencies'
+};
+function renderHero(h){
+  $('#score').textContent = Math.round(h.score);
+  $('#score').style.color = h.score>=80 ? 'var(--ink)' : h.score>=60 ? 'var(--r2)' : 'var(--r3)';
+  $('#grade').textContent = h.grade;
+  $('#verdict').textContent = VERDICT(h.score);
+
+  const max = Math.max(...Object.values(h.contributions), 1);
+  $('#pens').innerHTML = Object.keys(h.penalties).map(k=>`
+    <div class="pen">
+      <span>${LABEL[k]||k}</span>
+      <span class="track"><span class="fill" style="width:0" data-w="${(h.contributions[k]/max*100).toFixed(1)}"></span></span>
+      <span class="val num">−${h.contributions[k].toFixed(0)}</span>
+    </div>`).join('');
+  requestAnimationFrame(()=>document.querySelectorAll('.pen .fill')
+    .forEach(f=>f.style.width = f.dataset.w+'%'));
+
+  const f = h.facts;
+  $('#facts').innerHTML = [
+    [f.files,'files analysed'],
+    [f.hotspot_files,'churn + complexity hotspots'],
+    [f.cycle_count,'cycles over '+f.files_in_cycles+' files'],
+    [f.fragile_files,'fragile dependencies']
+  ].map(([n,l])=>`<span><b class="num">${n}</b> ${l}</span>`).join('');
+}
+
+// ---------- graph ----------
+let sim, gsel = {};
+function renderGraph(g){
+  const svg = d3.select('#graph');
+  svg.selectAll('*').remove();
+  const el = $('#graph'), W = el.clientWidth, H = el.clientHeight;
+  svg.attr('viewBox', `0 0 ${W} ${H}`);
+
+  if(!g.nodes.length){ svg.append('text').attr('x',20).attr('y',32).attr('class','axlabel')
+      .text('No Python files in the last run.'); return; }
+
+  const byId = new Map(g.nodes.map(n=>[n.id,n]));
+  const inCyc = new Set();
+  g.cycles.forEach(c=>c.forEach((p,i)=>inCyc.add(p+'>'+c[(i+1)%c.length])));
+
+  // Past a few hundred nodes a force layout is a hairball nobody can read.
+  // Keep the most-depended-on files, which is what the view is for, and say so.
+  const CAP = 160;
+  const shown = g.nodes.length > CAP
+    ? [...g.nodes].sort((a,b)=>(b.blast_radius-a.blast_radius)||(b.cc-a.cc)).slice(0,CAP)
+    : g.nodes;
+  const keepIds = new Set(shown.map(n=>n.id));
+  $('#gcount').textContent = g.nodes.length > CAP
+    ? `Showing the ${CAP} most-depended-on of ${g.nodes.length} files.` : '';
+
+  const nodes = shown.map(n=>({...n}));
+  const links = g.edges.filter(e=>keepIds.has(e.from)&&keepIds.has(e.to))
+    .map(e=>({source:e.from,target:e.to,cyc:inCyc.has(e.from+'>'+e.to)}));
+
+  const maxB = d3.max(nodes,n=>n.blast_radius)||1;
+  const r = d3.scaleSqrt().domain([0,maxB]).range([3.5,16]);
+
+  const root = svg.append('g');
+  svg.call(d3.zoom().scaleExtent([.3,4]).on('zoom',ev=>root.attr('transform',ev.transform)));
+
+  const link = root.append('g').selectAll('line').data(links).join('line')
+    .attr('class',d=>'link'+(d.cyc?' cyc':''));
+  const node = root.append('g').selectAll('circle').data(nodes).join('circle')
+    .attr('class','node').attr('r',d=>r(d.blast_radius))
+    .attr('fill',d=>RISK[d.risk_level]||'var(--r1)');
+  const label = root.append('g').selectAll('text')
+    .data(nodes.length<=70 ? nodes : nodes.filter(n=>n.blast_radius>=maxB*.5))
+    .join('text').attr('class','nlabel').attr('text-anchor','middle').text(d=>d.label);
+
+  const adj = new Map(nodes.map(n=>[n.id,new Set()]));
+  links.forEach(l=>{adj.get(l.source).add(l.target);adj.get(l.target).add(l.source);});
+
+  node.on('mouseenter',(ev,d)=>{
+      const keep = adj.get(d.id); keep.add(d.id);
+      node.classed('dim',n=>!keep.has(n.id));
+      label.classed('dim',n=>!keep.has(n.id));
+      link.classed('dim',l=>l.source.id!==d.id&&l.target.id!==d.id)
+          .classed('hot',l=>l.source.id===d.id||l.target.id===d.id);
+      showTip(ev,d.id,[['complexity',d.cc],['churn',d.churn],
+        ['blast radius',d.blast_radius],['risk',d.risk_level],
+        ...(d.in_cycle?[['','in a cycle']]:[])]);
+    })
+    .on('mousemove',moveTip)
+    .on('mouseleave',()=>{
+      node.classed('dim',false); label.classed('dim',false);
+      link.classed('dim',false).classed('hot',false); hideTip();
+    })
+    .on('click',(ev,d)=>focusRow(d.id));
+
+  node.call(d3.drag()
+    .on('start',(ev,d)=>{if(!ev.active)sim.alphaTarget(.25).restart();d.fx=d.x;d.fy=d.y;})
+    .on('drag',(ev,d)=>{d.fx=ev.x;d.fy=ev.y;})
+    .on('end',(ev,d)=>{if(!ev.active)sim.alphaTarget(0);d.fx=null;d.fy=null;}));
+
+  // Forces scale with the graph: a dozen nodes need room to spread or they
+  // huddle in the middle of an empty frame, while a few hundred need a
+  // centring pull or they drift off-canvas entirely.
+  const n = nodes.length, small = n < 50;
+  const dist = small ? 110 : 46;
+  const rep  = small ? -700 : -130;
+  const pull = small ? .02 : .05;
+  // A force layout settles into a round blob, but the frame is roughly 3:1.
+  // Pulling harder on Y than X flattens the layout to the frame's aspect, so
+  // the fit is not height-bound with empty margins either side.
+  const aspect = W / H;
+
+  let ticks = 0;
+  sim = d3.forceSimulation(nodes)
+    .force('link',d3.forceLink(links).id(d=>d.id).distance(dist).strength(.45))
+    .force('charge',d3.forceManyBody().strength(rep))
+    .force('center',d3.forceCenter(W/2,H/2))
+    .force('x',d3.forceX(W/2).strength(pull))
+    .force('y',d3.forceY(H/2).strength(pull*aspect*aspect*0.55))
+    .force('collide',d3.forceCollide(d=>r(d.blast_radius)+4))
+    .on('tick',()=>{
+      if((++ticks % 12)===0) fit();
+      link.attr('x1',d=>d.source.x).attr('y1',d=>d.source.y)
+          .attr('x2',d=>d.target.x).attr('y2',d=>d.target.y);
+      node.attr('cx',d=>d.x).attr('cy',d=>d.y);
+      label.attr('x',d=>d.x).attr('y',d=>d.y-r(d.blast_radius)-3);
+    })
+    .on('end',fit);
+
+  function fit(){
+    let x0=Infinity,x1=-Infinity,y0=Infinity,y1=-Infinity;
+    for(const n of nodes){
+      const rad = r(n.blast_radius) + 2;
+      if(n.x-rad<x0) x0=n.x-rad;
+      if(n.x+rad>x1) x1=n.x+rad;
+      if(n.y-rad-11<y0) y0=n.y-rad-11;   // label sits above the node
+      if(n.y+rad>y1) y1=n.y+rad;
+    }
+    const pad=16, w=(x1-x0)||1, h=(y1-y0)||1;
+    // Cap the zoom: a handful of nodes would otherwise scale up until the
+    // labels collide. Labels are counter-scaled so text keeps one screen size.
+    const k=Math.min((W-pad*2)/w,(H-pad*2)/h,1.25);
+    root.attr('transform',
+      `translate(${W/2-k*(x0+x1)/2},${H/2-k*(y0+y1)/2}) scale(${k})`);
+    label.attr('font-size',(9/k).toFixed(2));
+  }
+
+  if(matchMedia('(prefers-reduced-motion:reduce)').matches){
+    sim.stop(); for(let i=0;i<220;i++) sim.tick();
+    sim.dispatch?.call?.('tick');
+    link.attr('x1',d=>d.source.x).attr('y1',d=>d.source.y)
+        .attr('x2',d=>d.target.x).attr('y2',d=>d.target.y);
+    node.attr('cx',d=>d.x).attr('cy',d=>d.y);
+    label.attr('x',d=>d.x).attr('y',d=>d.y-r(d.blast_radius)-3);
+    fit();
+  }
+  gsel = {node,link,label};
+}
+
+// ---------- scatter ----------
+function renderScatter(files){
+  const svg = d3.select('#scatter'); svg.selectAll('*').remove();
+  const el = $('#scatter'), W = el.clientWidth, H = el.clientHeight;
+  const m = {t:10,r:14,b:34,l:44};
+  svg.attr('viewBox',`0 0 ${W} ${H}`);
+  const pts = files.filter(f=>f.cc_total>0||f.churn>0);
+  if(!pts.length){ svg.append('text').attr('x',14).attr('y',28).attr('class','axlabel')
+      .text('Nothing to plot yet.'); return; }
+
+  // 8% headroom so a point at the maximum is not clipped by the frame
+  const xm = (d3.max(pts,p=>p.churn)||1)*1.08, ym = (d3.max(pts,p=>p.cc_total)||1)*1.08;
+  const x = d3.scaleLinear().domain([0,xm]).nice().range([m.l,W-m.r]);
+  const y = d3.scaleLinear().domain([0,ym]).nice().range([H-m.b,m.t]);
+
+  svg.append('g').attr('transform',`translate(0,${H-m.b})`)
+    .call(d3.axisBottom(x).ticks(5).tickSize(-(H-m.t-m.b)));
+  svg.append('g').attr('transform',`translate(${m.l},0)`)
+    .call(d3.axisLeft(y).ticks(5).tickSize(-(W-m.l-m.r)));
+  svg.selectAll('.domain').attr('stroke','var(--rule-strong)');
+  svg.append('text').attr('class','axlabel').attr('x',W-m.r).attr('y',H-6)
+     .attr('text-anchor','end').text('commits touching the file');
+  svg.append('text').attr('class','axlabel').attr('transform','rotate(-90)')
+     .attr('x',-m.t).attr('y',12).attr('text-anchor','end').text('cyclomatic complexity');
+
+  svg.append('g').selectAll('circle').data(pts).join('circle')
+    .attr('class','dot').attr('cx',p=>x(p.churn)).attr('cy',p=>y(p.cc_total))
+    .attr('r',5).attr('fill',p=>RISK[p.risk_level]||'var(--r1)')
+    .on('mouseenter',(ev,p)=>showTip(ev,p.path,[['churn',p.churn],
+      ['complexity',p.cc_total],['blast radius',p.blast_radius],['risk',p.risk_level]]))
+    .on('mousemove',moveTip).on('mouseleave',hideTip)
+    .on('click',(ev,p)=>focusRow(p.path));
+}
+
+// ---------- cycles ----------
+function renderCycles(cy){
+  const box = $('#cycles');
+  if(!cy.length){ box.innerHTML = `<p class="clean">No circular imports detected.</p>`; return; }
+  box.innerHTML = `<ul class="cyclist">` + cy.map(c=>`
+    <li><div class="chain">${c.chain.map(esc).join('<em>&rarr;</em>')}<em>&rarr;</em>${esc(c.chain[0])}</div>
+    <div class="len">${c.length} files</div></li>`).join('') + `</ul>`;
+}
+
+// ---------- table ----------
+let sortKey='risk_score', sortDir=-1, tableLimit=25;
+function renderTable(){
+  const rows = [...DATA.files].sort((a,b)=>{
+    const va = sortKey==='hours'?a.refactor.hours:a[sortKey];
+    const vb = sortKey==='hours'?b.refactor.hours:b[sortKey];
+    return (typeof va==='string' ? va.localeCompare(vb) : va-vb) * sortDir;
+  });
+  const page = rows.slice(0, tableLimit);
+  $('#tcount').textContent = rows.length > page.length
+    ? `Showing ${page.length} of ${rows.length} files, ranked by blast radius times churn times complexity.`
+    : `${rows.length} files, ranked by blast radius times churn times complexity.`;
+  $('#more').hidden = rows.length <= page.length;
+  $('#more').textContent = `Show all ${rows.length} files`;
+  $('#files tbody').innerHTML = page.map(f=>`
+    <tr data-p="${esc(f.path)}">
+      <td class="path" title="${esc(f.path)}">${esc(f.path)}${f.in_cycle?'<span class="cyc-tag">cycle</span>':''}</td>
+      <td class="r num">${f.churn}</td>
+      <td class="r num">${f.cc_total}</td>
+      <td class="r num">${f.max_nesting}</td>
+      <td class="r num">${f.blast_radius}</td>
+      <td class="r num">${f.refactor.hours?f.refactor.hours+'h':'—'}</td>
+      <td><span class="lvl"><i style="background:${RISK[f.risk_level]}"></i>${esc(f.risk_level)}</span></td>
+    </tr>`).join('');
+  document.querySelectorAll('#files tbody tr').forEach(tr=>{
+    tr.onclick = ()=>focusRow(tr.dataset.p);
+    tr.onmouseenter = ev=>{
+      const f = DATA.files.find(x=>x.path===tr.dataset.p);
+      if(f?.refactor.drivers.length) showTip(ev,f.path,f.refactor.drivers.map(d=>['',d]));
+    };
+    tr.onmousemove = moveTip; tr.onmouseleave = hideTip;
+  });
+}
+function focusRow(path){
+  document.querySelectorAll('#files tbody tr').forEach(tr=>{
+    const on = tr.dataset.p===path;
+    tr.classList.toggle('on',on);
+    if(on) tr.scrollIntoView({block:'center',behavior:
+      matchMedia('(prefers-reduced-motion:reduce)').matches?'auto':'smooth'});
+  });
+}
+$('#more').onclick = ()=>{ tableLimit = Infinity; renderTable(); };
+
+document.querySelectorAll('#files th[role=button]').forEach(th=>{
+  const go = ()=>{
+    const k = th.dataset.k;
+    sortDir = (k===sortKey) ? -sortDir : (k==='path'?1:-1);
+    sortKey = k; renderTable();
+  };
+  th.onclick = go;
+  th.onkeydown = e => { if(e.key==='Enter'||e.key===' '){ e.preventDefault(); go(); } };
+});
+
+// ---------- config ----------
+const FIELDS = [
+  ['gatekeeper','complexity_spike_pct','Spike threshold (%)'],
+  ['gatekeeper','baseline_window','Baseline window (runs)'],
+  ['gatekeeper','min_baseline_cc','Minimum baseline complexity'],
+  ['thresholds','max_cc_per_function','Max complexity per function'],
+  ['thresholds','max_nesting_depth','Max nesting depth'],
+  ['thresholds','max_class_loc','Max class length (lines)'],
+];
+function renderConfig(cfg){
+  $('#cfg').innerHTML = FIELDS.map(([sec,key,label])=>`
+    <div><label for="f_${key}">${label}</label>
+    <input id="f_${key}" type="number" step="any" data-sec="${sec}" data-key="${key}"
+           value="${cfg[sec]?.[key] ?? ''}"></div>`).join('');
+}
+$('#save').onclick = async ()=>{
+  const payload = {gatekeeper:{},thresholds:{}};
+  document.querySelectorAll('#cfg input').forEach(i=>{
+    const v = parseFloat(i.value);
+    if(!Number.isNaN(v)) payload[i.dataset.sec][i.dataset.key] = v;
+  });
+  const btn = $('#save'); btn.disabled = true;
+  try{
+    const r = await fetch('/api/config',{method:'PUT',
+      headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+    if(!r.ok) throw new Error((await r.json()).detail || 'save failed');
+    const msg = $('#savedmsg'); msg.textContent='Saved'; msg.classList.add('show');
+    setTimeout(()=>msg.classList.remove('show'),2200);
+  }catch(e){
+    const msg = $('#savedmsg'); msg.textContent = e.message;
+    msg.style.color='var(--r3)'; msg.classList.add('show');
+  }finally{ btn.disabled = false; }
+};
+
+// ---------- theme ----------
+$('#theme').onclick = ()=>{
+  const now = document.documentElement.dataset.theme;
+  const dark = now==='dark' || (now!=='light' && matchMedia('(prefers-color-scheme:dark)').matches);
+  document.documentElement.dataset.theme = dark ? 'light' : 'dark';
+  if(DATA.graph){ renderGraph(DATA.graph); renderScatter(DATA.files); renderTable(); }
+};
+
+// ---------- boot ----------
+(async function(){
+  try{
+    const [meta,health,files,graph,cycles,cfg] = await Promise.all([
+      get('/api/meta'),get('/api/health'),get('/api/files'),
+      get('/api/graph'),get('/api/cycles'),get('/api/config')
+    ]);
+    DATA = {meta,health,files,graph,cycles,cfg};
+
+    $('#repo').textContent = meta.repo.name;
+    const when = meta.run.completed_at
+      ? new Date(meta.run.completed_at).toLocaleString(undefined,
+          {day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'})
+      : '';
+    $('#runmeta').innerHTML =
+      `<span>run ${meta.run.id}</span><span>${esc(when)}</span>` +
+      `<span>${meta.commits_ingested} commits</span>`;
+    $('#runmeta').style.display='contents';
+
+    // Unhide first: a hidden element reports clientWidth 0, which would
+    // collapse every SVG viewBox to nothing.
+    $('#main').hidden = false;
+    renderHero(health); renderGraph(graph); renderScatter(files);
+    renderCycles(cycles); renderTable(); renderConfig(cfg);
+  }catch(e){
+    $('#err').hidden = false;
+    $('#err').innerHTML = `<p>${esc(e.message)}</p>
+      <p>Run <code>repohealth scan</code> in the repository, then reload.</p>`;
+  }
+})();
+
+let rt;
+addEventListener('resize',()=>{ clearTimeout(rt); rt=setTimeout(()=>{
+  if(DATA.graph){ renderGraph(DATA.graph); renderScatter(DATA.files); }
+},200); });
+</script>
+</body>
+</html>

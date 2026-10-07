@@ -170,13 +170,26 @@ def _sorted_scores(scores_key: tuple[int, ...]) -> tuple[int, ...]:
 
 
 def risk_level(score: int, scores: list[int]) -> str:
-    """Percentile banding against the repo's own distribution."""
+    """Band against the repo's own distribution, by rank AND by magnitude.
+
+    Rank alone is not enough. In a uniform repository every file ties, every
+    tie lands in the top decile, and the whole codebase is reported "high" --
+    which contradicts a healthy overall score and trains the reader to ignore
+    the column. A file is only high-risk if it both ranks near the top and
+    stands well clear of the typical file.
+    """
     if not scores:
         return "low"
     ordered = _sorted_scores(tuple(scores))
+    if ordered[-1] == ordered[0]:
+        return "low"  # no spread: nothing stands out from anything else
+
     rank = bisect_right(ordered, score) / len(ordered)
-    if rank >= 0.9:
+    median = ordered[len(ordered) // 2] or 1
+    ratio = score / median
+
+    if rank >= 0.9 and ratio >= 1.5:
         return "high"
-    if rank >= 0.7:
+    if rank >= 0.7 and ratio >= 1.2:
         return "medium"
     return "low"
