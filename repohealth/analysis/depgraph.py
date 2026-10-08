@@ -158,41 +158,57 @@ def extract_imports(
         seen.add(key)
         edges.append(Edge(rel_path, hit, kind))
 
+    def add_hit(hit: str | None, kind: str) -> bool:
+        if hit is None or hit == rel_path:
+            return False
+        key = (rel_path, hit)
+        if key not in seen:
+            seen.add(key)
+            edges.append(Edge(rel_path, hit, kind))
+        return True
+
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
                 add(alias.name, "import")
 
         elif isinstance(node, ast.ImportFrom):
+            # Resolve the dotted package the names are being imported FROM.
+            # For a relative import that means walking up from this file's own
+            # package by one level per leading dot.
             if node.level and node.level > 0:
-                base_parts = pkg.split(".") if pkg else []
+                parts = pkg.split(".") if pkg else []
                 up = node.level - 1
-                base_parts = base_parts[: len(base_parts) - up] if up else base_parts
-                base = ".".join(p for p in base_parts if p)
-                target = f"{base}.{node.module}" if node.module else base
-                if not target:
-                    continue
-                hit = _resolve(target, index)
-                if hit is None:
-                    for alias in node.names:
-                        add(f"{target}.{alias.name}" if target else alias.name, "relative")
-                elif hit != rel_path:
-                    key = (rel_path, hit)
-                    if key not in seen:
-                        seen.add(key)
-                        edges.append(Edge(rel_path, hit, "relative"))
+                if up:
+                    parts = parts[: len(parts) - up]
+                base = ".".join(p for p in parts if p)
+                if node.module:
+                    base = f"{base}.{node.module}" if base else node.module
+                kind = "relative"
             else:
                 base = node.module or ""
-                hit = _resolve(base, index)
+                kind = "from"
+
+            if not base and not node.names:
+                continue
+
+            # `from X import a` is ambiguous: `a` may be a SUBMODULE of package
+            # X, or an attribute defined inside module X. The submodule is a
+            # real file-level dependency, so it wins when one exists -- without
+            # this, `from . import b` resolves to the package __init__ and the
+            # edge to b.py is lost entirely.
+            resolved_any = False
+            for alias in node.names:
+                candidate = f"{base}.{alias.name}" if base else alias.name
+                if candidate in index and add_hit(index[candidate], kind):
+                    resolved_any = True
+
+            if not resolved_any:
+                hit = _resolve(base, index) if base else None
                 if hit is not None:
-                    if hit != rel_path:
-                        key = (rel_path, hit)
-                        if key not in seen:
-                            seen.add(key)
-                            edges.append(Edge(rel_path, hit, "from"))
-                else:
-                    for alias in node.names:
-                        add(f"{base}.{alias.name}" if base else alias.name, "from")
+                    add_hit(hit, kind)
+                elif base:
+                    unresolved.append(base)
 
     return edges, unresolved
 

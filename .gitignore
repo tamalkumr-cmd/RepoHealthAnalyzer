@@ -1,5 +1,10 @@
-﻿.venv/
+.venv/
+venv/
 .repohealth/
 __pycache__/
 *.pyc
+*.egg-info/
+build/
+dist/
+.pytest_cache/
 graph.json

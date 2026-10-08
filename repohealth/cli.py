@@ -317,7 +317,17 @@ def cmd_score(args) -> int:
 
 
 def cmd_serve(args) -> int:
-    from .api.server import serve
+    try:
+        from .api.server import serve
+    except ImportError:
+        # The dashboard is an optional extra -- the CLI and the commit hook
+        # work without a web server, so a missing FastAPI is a normal state,
+        # not a broken install.
+        print(f"{C.YELLOW}The dashboard needs FastAPI, which isn't installed.{C.RESET}")
+        print(f"  {C.DIM}pip install 'repohealth-analyzer[dashboard]'{C.RESET}")
+        print(f"  {C.DIM}or: pip install fastapi uvicorn{C.RESET}")
+        return 1
+
     repo, root, cfg = _resolve(args.path)
     _require_db(root, cfg)
     print(f"{C.CYAN}RepoHealth{C.RESET} serving {root.name} at "
